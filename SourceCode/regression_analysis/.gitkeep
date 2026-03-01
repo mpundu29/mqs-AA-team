@@ -1,1 +1,114 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import statsmodels.api as sm
+from pathlib import Path
 
+
+# ---------------------------------------------------
+# 1. CONFIGURATION
+# ---------------------------------------------------
+TICKERS = [
+    "AAPL","MSFT","NVDA","JPM","XOM","JNJ","PG","WMT",
+    "QQQ","IWM","XLU","XLV",
+    "SHY","IEF","GLD","VNQ"
+]
+
+MARKET_TICKER = "^GSPC"
+START_DATE = "2024-10-01"
+END_DATE = "2025-10-31"
+
+REGIME_FILE = "../data/processed/regime_labels.csv"
+OUTPUT_FILE = "results/capm_beta_by_regime.csv"
+
+# ---------------------------------------------------
+# 2. DOWNLOAD & PREPARE DATA
+# ---------------------------------------------------
+def download_returns():
+    tickers = TICKERS + [MARKET_TICKER]
+    prices = yf.download(tickers, start=START_DATE, end=END_DATE, auto_adjust=True)["Close"]
+
+    returns = prices.pct_change().dropna()
+    returns.rename(columns={MARKET_TICKER: "SP500"}, inplace=True)
+
+    return returns
+
+# ---------------------------------------------------
+# 3. MERGE REGIME LABELS
+# ---------------------------------------------------
+def merge_regimes(returns):
+    """
+    Temporary regime classification based on rolling volatility of S&P 500
+    (until teammate provides official regime labels)
+    """
+    df = returns.copy()
+
+    # 20-day rolling volatility of market
+    df["volatility"] = df["SP500"].rolling(window=20).std()
+
+    # Median volatility threshold
+    threshold = df["volatility"].median()
+
+    # Assign regimes
+    df["Regime"] = df["volatility"].apply(
+        lambda x: "HighVol" if x > threshold else "LowVol"
+    )
+
+    df = df.dropna()
+    return df
+
+# ---------------------------------------------------
+# 4. RUN CAPM REGRESSION BY REGIME
+# ---------------------------------------------------
+def run_capm_by_regime(df):
+    results = {}
+    rows = []
+
+    regimes = df["Regime"].unique()
+
+    for asset in TICKERS:
+        for regime in regimes:
+            subset = df[df["Regime"] == regime].dropna()
+
+            y = subset[asset]
+            X = sm.add_constant(subset["SP500"])
+
+            model = sm.OLS(y, X).fit()
+
+            results[(asset, regime)] = model
+
+            rows.append({
+                "Asset": asset,
+                "Regime": regime,
+                "Alpha": model.params["const"],
+                "Beta": model.params["SP500"],
+                "R_squared": model.rsquared
+            })
+
+    beta_table = pd.DataFrame(rows)
+    return results, beta_table
+# ---------------------------------------------------
+# 5. MAIN EXECUTION
+# ---------------------------------------------------
+def main():
+    print("Downloading market and asset data...")
+    returns = download_returns()
+
+    print("Merging regime labels...")
+    df = merge_regimes(returns)
+
+    print("Running CAPM regressions by regime...")
+    results, beta_table = run_capm_by_regime(df)
+
+    print("\n=== CAPM Coefficients by Regime ===")
+    print(beta_table)
+
+    from pathlib import Path
+    results_dir = Path.cwd() / "results"
+    results_dir.mkdir(exist_ok=True)
+    output_path = results_dir / "capm_beta_by_regime.csv"
+    beta_table.to_csv(output_path, index=False)
+    print(f"Results saved to: {output_path}")
+if __name__ == "__main__":
+    main()  
+    
